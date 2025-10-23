@@ -15,7 +15,7 @@ print(df.head())
 
 # --- 2️⃣ Basic cleaning ---
 # Drop irrelevant columns
-df = df.drop(columns=['PassengerId', 'Name', 'Ticket', 'Cabin'], errors='ignore')
+df = df.drop(columns=['PassengerId', 'Name', 'Ticket'], errors='ignore')
 
 # Handle missing values
 df['Age'] = df['Age'].fillna(df['Age'].median())
