@@ -7,7 +7,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
 
 # --- 1️⃣ Load Titanic dataset ---
-df = pd.read_csv("titanic.csv")  # <- make sure your file name is correct
+df = pd.read_csv("Titanic-Dataset.csv")  # <- make sure your file name is correct
 
 print("✅ Data loaded successfully!")
 print("Shape:", df.shape)
