@@ -283,3 +283,4 @@ if __name__ == "__main__":
             pass
     except Exception as e:
         print("Error:", e)
+#show all information in  dataset as Titanic-ready.csv.
