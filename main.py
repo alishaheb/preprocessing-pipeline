@@ -1,14 +1,14 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, List, Tuple, Iterable, Union, Callable
 import warnings
 
-# --- Optional deps (import if available, degrade gracefully) ---
+# --- Optional deps ---
 try:
     import pandas as pd
     import numpy as np
-except Exception:  # pragma: no cover
+except Exception:
     pd = None  # type: ignore
     np = None  # type: ignore
 
@@ -16,24 +16,14 @@ try:
     from sklearn.impute import SimpleImputer
     from sklearn.preprocessing import StandardScaler
     from sklearn.feature_extraction.text import TfidfVectorizer
-except Exception:  # pragma: no cover
+except Exception:
     SimpleImputer = StandardScaler = TfidfVectorizer = None  # type: ignore
 
-try:
-    from PIL import Image
-except Exception:  # pragma: no cover
-    Image = None  # type: ignore
-
 
 # =========================
-# Base Interfaces
+# Base
 # =========================
-
 class BaseAdapter(ABC):
-    """
-    Interface for all data adapters. Each adapter encapsulates 'fit' and 'transform'
-    for a specific data modality. 'data' can be any structure your adapter supports.
-    """
     @abstractmethod
     def fit(self, data: Any) -> "BaseAdapter":
         ...
@@ -47,11 +37,23 @@ class BaseAdapter(ABC):
 
 
 # =========================
-# Config Objects (per modality)
+# Configs (incl. CSV)
 # =========================
+@dataclass
+class CSVConfig:
+    encoding: Optional[str] = None
+    sep: str = ","
+    header: Union[int, None] = 0
+    index_col: Optional[Union[int, str]] = None
+    parse_dates: Optional[Union[List[int], List[str], Dict[str, List[str]]]] = None
+    dtype: Optional[Dict[str, Any]] = None
+    na_values: Optional[Union[str, List[str], Dict[str, List[str]]]] = None
+    extra_read_csv_kwargs: Optional[Dict[str, Any]] = None
+
 
 @dataclass
 class TabularConfig:
+    csv: CSVConfig = CSVConfig()
     impute_strategy: str = "median"    # 'mean', 'median', 'most_frequent', 'constant'
     scale: bool = True
     drop_duplicates: bool = True
@@ -66,20 +68,13 @@ class TextConfig:
     strip_punct: bool = True
     min_df: int = 2
     max_df: Union[float, int] = 0.95
-    ngram_range: Tuple[int, int] = (1, 2)  # unigrams + bigrams
+    ngram_range: Tuple[int, int] = (1, 2)
     max_features: Optional[int] = 20000
 
 
 @dataclass
-class ImageConfig:
-    target_size: Tuple[int, int] = (224, 224)
-    to_rgb: bool = True
-    normalize: bool = True  # scale to [0, 1]
-
-
-@dataclass
 class TimeSeriesConfig:
-    resample_rule: Optional[str] = None  # e.g., 'D', 'H'; if None, keep as-is
+    resample_rule: Optional[str] = None  # e.g., 'D', 'H'
     forward_fill: bool = True
     interpolate: bool = False
     scale: bool = True
@@ -88,7 +83,6 @@ class TimeSeriesConfig:
 # =========================
 # Adapters
 # =========================
-
 class TabularAdapter(BaseAdapter):
     def __init__(self, config: Optional[TabularConfig] = None):
         self.config = config or TabularConfig()
@@ -99,18 +93,40 @@ class TabularAdapter(BaseAdapter):
 
         if pd is None or np is None:
             warnings.warn("pandas/numpy not available; TabularAdapter disabled.", RuntimeWarning)
-
         if SimpleImputer is None or StandardScaler is None:
             warnings.warn("scikit-learn not available; TabularAdapter will be limited.", RuntimeWarning)
+
+    def _to_dataframe(self, data: Union[str, "pd.DataFrame"]) -> "pd.DataFrame":
+        if pd is None:
+            raise RuntimeError("pandas is required for TabularAdapter")
+        if isinstance(data, str):
+            if not data.lower().endswith(".csv"):
+                raise ValueError("TabularAdapter expected a DataFrame or a .csv path.")
+            cfg = self.config.csv
+            kwargs = dict(
+                sep=cfg.sep,
+                header=cfg.header,
+                index_col=cfg.index_col,
+                parse_dates=cfg.parse_dates,
+                dtype=cfg.dtype,
+                na_values=cfg.na_values,
+            )
+            if cfg.encoding is not None:
+                kwargs["encoding"] = cfg.encoding
+            if cfg.extra_read_csv_kwargs:
+                kwargs.update(cfg.extra_read_csv_kwargs)
+            return pd.read_csv(data, **kwargs)
+        return data
 
     def _split_columns(self, df: "pd.DataFrame") -> None:
         self._cols_numeric = df.select_dtypes(include=["number"]).columns.tolist()
         self._cols_categorical = [c for c in df.columns if c not in self._cols_numeric]
 
-    def fit(self, data: "pd.DataFrame") -> "TabularAdapter":
+    def fit(self, data: Union[str, "pd.DataFrame"]) -> "TabularAdapter":
         if pd is None:
             return self
-        df = data.copy()
+        df = self._to_dataframe(data).copy()
+
         if self.config.drop_duplicates:
             df = df.drop_duplicates()
 
@@ -124,7 +140,6 @@ class TabularAdapter(BaseAdapter):
             self._imputer.fit(df[self._cols_numeric])
 
         if StandardScaler is not None and self.config.scale and self._cols_numeric:
-            # We'll fit scaler after imputation to avoid NaNs
             X_num = df[self._cols_numeric]
             if self._imputer is not None:
                 X_num = self._imputer.transform(X_num)
@@ -132,20 +147,19 @@ class TabularAdapter(BaseAdapter):
 
         return self
 
-    def transform(self, data: "pd.DataFrame") -> "pd.DataFrame":
+    def transform(self, data: Union[str, "pd.DataFrame"]) -> "pd.DataFrame":
         if pd is None:
             raise RuntimeError("pandas is required for TabularAdapter")
 
-        df = data.copy()
+        df = self._to_dataframe(data).copy()
 
         if self.config.drop_duplicates:
             df = df.drop_duplicates()
 
         if self.config.drop_full_nan_cols:
-            # Align with columns seen at fit if possible
             df = df.loc[:, [c for c in df.columns if not df[c].isna().all()]]
 
-        # Ensure same columns ordering: add missing cols with NaNs
+        # Ensure same columns seen in fit (add missing with NaN)
         for c in self._cols_numeric + self._cols_categorical:
             if c not in df.columns:
                 df[c] = np.nan
@@ -163,7 +177,6 @@ class TabularAdapter(BaseAdapter):
 
         # Scale numeric
         if self.config.scale and self._cols_numeric and self._scaler is not None:
-            # Some numeric columns may have been expanded by get_dummies; only scale original numeric cols
             for c in self._cols_numeric:
                 if c in df.columns:
                     df[c] = self._scaler.transform(df[[c]])
@@ -175,7 +188,6 @@ class TextAdapter(BaseAdapter):
     def __init__(self, config: Optional[TextConfig] = None):
         self.config = config or TextConfig()
         self._vectorizer = None
-
         if TfidfVectorizer is None:
             warnings.warn("scikit-learn not available; TextAdapter disabled.", RuntimeWarning)
 
@@ -196,7 +208,6 @@ class TextAdapter(BaseAdapter):
     def fit(self, data: Iterable[str]) -> "TextAdapter":
         texts = list(data)
         texts = self._basic_clean(texts, self.config.lowercase, self.config.strip_punct)
-
         if TfidfVectorizer is not None:
             self._vectorizer = TfidfVectorizer(
                 min_df=self.config.min_df,
@@ -209,44 +220,9 @@ class TextAdapter(BaseAdapter):
     def transform(self, data: Iterable[str]):
         texts = list(data)
         texts = self._basic_clean(texts, self.config.lowercase, self.config.strip_punct)
-
         if self._vectorizer is None:
-            return texts  # return cleaned strings if sklearn is unavailable
-        return self._vectorizer.transform(texts)  # sparse matrix
-
-
-class ImageAdapter(BaseAdapter):
-    def __init__(self, config: Optional[ImageConfig] = None):
-        self.config = config or ImageConfig()
-        if Image is None:
-            warnings.warn("Pillow not available; ImageAdapter disabled.", RuntimeWarning)
-
-    def _load(self, x: Union[str, "Image.Image"]) -> "Image.Image":
-        if isinstance(x, str):
-            if Image is None:
-                raise RuntimeError("Pillow required to load images from paths")
-            return Image.open(x)
-        return x
-
-    def fit(self, data: Iterable[Union[str, "Image.Image"]]) -> "ImageAdapter":
-        # No training state for basic image normalization/resizing
-        return self
-
-    def transform(self, data: Iterable[Union[str, "Image.Image"]]):
-        if Image is None:
-            raise RuntimeError("Pillow is required for ImageAdapter")
-
-        processed = []
-        for x in data:
-            img = self._load(x)
-            if self.config.to_rgb:
-                img = img.convert("RGB")
-            img = img.resize(self.config.target_size)
-            arr = np.array(img, dtype="float32")
-            if self.config.normalize:
-                arr = arr / 255.0
-            processed.append(arr)
-        return np.stack(processed, axis=0)  # (N, H, W, C)
+            return texts
+        return self._vectorizer.transform(texts)
 
 
 class TimeSeriesAdapter(BaseAdapter):
@@ -268,10 +244,8 @@ class TimeSeriesAdapter(BaseAdapter):
 
         if self.config.resample_rule:
             df = df.resample(self.config.resample_rule).mean()
-
         if self.config.interpolate:
             df = df.interpolate()
-
         if self.config.forward_fill:
             df = df.ffill()
 
@@ -289,10 +263,8 @@ class TimeSeriesAdapter(BaseAdapter):
 
         if self.config.resample_rule:
             df = df.resample(self.config.resample_rule).mean()
-
         if self.config.interpolate:
             df = df.interpolate()
-
         if self.config.forward_fill:
             df = df.ffill()
 
@@ -305,12 +277,7 @@ class TimeSeriesAdapter(BaseAdapter):
 # =========================
 # Dispatcher / Registry
 # =========================
-
 class AdapterRegistry:
-    """
-    Holds rules to pick an adapter based on a predicate on the incoming data.
-    You can register new modalities without touching the core pipeline.
-    """
     def __init__(self):
         self._rules: List[Tuple[Callable[[Any], bool], Callable[[], BaseAdapter]]] = []
 
@@ -328,12 +295,6 @@ class AdapterRegistry:
 
 
 class Preprocessor:
-    """
-    High-level entry point:
-      pre = Preprocessor().fit(data).transform(data)
-    or:
-      X = pre.fit_transform(data)
-    """
     def __init__(self, registry: Optional[AdapterRegistry] = None):
         self.registry = registry or default_registry()
         self._adapter: Optional[BaseAdapter] = None
@@ -344,7 +305,6 @@ class Preprocessor:
 
     def transform(self, data: Any) -> Any:
         if self._adapter is None:
-            # stateless transform if possible
             self._adapter = self.registry.resolve(data)
         return self._adapter.transform(data)
 
@@ -354,21 +314,21 @@ class Preprocessor:
 
 
 # =========================
-# Default registry with sensible predicates
+# Default registry (NO images)
 # =========================
-
 def default_registry() -> AdapterRegistry:
     reg = AdapterRegistry()
 
-    # ---- Tabular: pandas DataFrame without DatetimeIndex
+    # CSV path or DataFrame (non time-index) => Tabular
     def is_tabular(x: Any) -> bool:
-        return (pd is not None
-                and isinstance(x, pd.DataFrame)
-                and not isinstance(x.index, pd.DatetimeIndex))
+        is_csv = isinstance(x, str) and x.lower().endswith(".csv")
+        is_df_no_ts = (pd is not None and isinstance(x, pd.DataFrame)
+                       and not isinstance(x.index, pd.DatetimeIndex))
+        return is_csv or is_df_no_ts
 
     reg.register(is_tabular, lambda: TabularAdapter())
 
-    # ---- Time series: DataFrame with DatetimeIndex
+    # Time series: DataFrame with DatetimeIndex
     def is_timeseries(x: Any) -> bool:
         return (pd is not None
                 and isinstance(x, pd.DataFrame)
@@ -376,7 +336,7 @@ def default_registry() -> AdapterRegistry:
 
     reg.register(is_timeseries, lambda: TimeSeriesAdapter())
 
-    # ---- Text: iterable of strings (or pandas Series of object/str)
+    # Text: iterable of strings or pandas Series of object/str
     def is_text(x: Any) -> bool:
         if pd is not None and isinstance(x, pd.Series):
             return x.dtype == "object" or x.dtype == "string"
@@ -386,48 +346,14 @@ def default_registry() -> AdapterRegistry:
 
     reg.register(is_text, lambda: TextAdapter())
 
-    # ---- Images: iterable of file paths or PIL Images
-    def is_images(x: Any) -> bool:
-        if isinstance(x, (list, tuple)) and len(x) > 0:
-            first = x[0]
-            if isinstance(first, str):
-                return True
-            if Image is not None and isinstance(first, Image.Image):
-                return True
-        return False
-
-    reg.register(is_images, lambda: ImageAdapter())
-
     return reg
 
 
 # =========================
-# Example usage
+# Example
 # =========================
 if __name__ == "__main__":
-    # These demos only run if optional deps are installed.
-    if pd is not None and np is not None:
-        # ---- Tabular
-        df = pd.DataFrame({
-            "age": [20, 21, None, 23],
-            "income": [30_000, None, 45_000, 50_000],
-            "city": ["London", "London", "Leeds", None],
-        })
-        X_tab = Preprocessor().fit_transform(df)
-        print("Tabular ->", type(X_tab), X_tab.shape if hasattr(X_tab, "shape") else len(X_tab))
-
-        # ---- Time series
-        idx = pd.date_range("2024-01-01", periods=5, freq="D")
-        ts = pd.DataFrame({"y": [1.0, None, 3.0, None, 5.0]}, index=idx)
-        X_ts = Preprocessor().fit(TimeSeriesAdapter(TimeSeriesConfig(resample_rule="D", forward_fill=True))).transform(ts)  # custom fit path
-        print("TimeSeries ->", type(X_ts), X_ts.shape)
-
-    # ---- Text (works without pandas)
-    corpus = ["Cats are GREAT!", "I love cats and dogs.", "Dogs are friendly."]
-    X_text = Preprocessor().fit_transform(corpus)
-    try:
-        shape = X_text.shape
-    except Exception:
-        shape = len(X_text)
-    print("Text ->", type(X_text), shape)
+    csv_path = "/mnt/data/Titanic-Dataset 2.csv"  # adjust if needed
+    X_tab = Preprocessor().fit_transform(csv_path)
+    print("From CSV ->", type(X_tab), getattr(X_tab, "shape", None))
 
