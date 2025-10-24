@@ -284,3 +284,36 @@ if __name__ == "__main__":
     except Exception as e:
         print("Error:", e)
 #show all information in  dataset as Titanic-ready.csv.
+pre = Preprocessor().fit(csv_path)           # or .fit(df)
+X = pre.transform(csv_path)                  # transformed features
+
+# Shapes and columns
+print("Input shape:", pd.read_csv(csv_path).shape)
+print("Output shape:", X.shape)
+print("First 10 output columns:", list(X.columns)[:10])
+
+# What the adapter learned
+adapter = pre._adapter                        # TabularAdapter
+print("Numeric cols:", adapter._cols_numeric)
+print("Categorical cols:", adapter._cols_categorical)
+print("Final feature columns:", len(adapter._feature_columns))
+
+# Peek at values (scaled numeric + one-hot)
+print(X.head(3))
+    #show all information in  dataset as Titanic-ready.csv.
+    pre = Preprocessor().fit(csv_path)           # or .fit(df)
+    X = pre.transform(csv_path)                  # transformed features
+
+    # Shapes and columns
+    print("Input shape:", pd.read_csv(csv_path).shape)
+    print("Output shape:", X.shape)
+    print("First 10 output columns:", list(X.columns)[:10])
+
+    # What the adapter learned
+    adapter = pre._adapter                        # TabularAdapter
+    print("Numeric cols:", adapter._cols_numeric)
+    print("Categorical cols:", adapter._cols_categorical)
+    print("Final feature columns:", len(adapter._feature_columns))
+
+    # Peek at values (scaled numeric + one-hot)
+    print(X.head(3))
