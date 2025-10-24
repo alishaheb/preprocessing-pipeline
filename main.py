@@ -1,27 +1,29 @@
+# main.py
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, List, Tuple, Iterable, Union, Callable
 import warnings
+import os
 
-# --- Optional deps ---
+# --- Optional deps (graceful degradation) ---
 try:
     import pandas as pd
     import numpy as np
-except Exception:
+except Exception:  # pragma: no cover
     pd = None  # type: ignore
     np = None  # type: ignore
 
 try:
     from sklearn.impute import SimpleImputer
     from sklearn.preprocessing import StandardScaler
-    from sklearn.feature_extraction.text import TfidfVectorizer
-except Exception:
-    SimpleImputer = StandardScaler = TfidfVectorizer = None  # type: ignore
+except Exception:  # pragma: no cover
+    SimpleImputer = None  # type: ignore
+    StandardScaler = None  # type: ignore
 
 
 # =========================
-# Base
+# Base Interface
 # =========================
 class BaseAdapter(ABC):
     @abstractmethod
@@ -37,10 +39,11 @@ class BaseAdapter(ABC):
 
 
 # =========================
-# Configs (incl. CSV)
+# Configs
 # =========================
 @dataclass
 class CSVConfig:
+    """How to read CSVs when a path is passed instead of a DataFrame."""
     encoding: Optional[str] = None
     sep: str = ","
     header: Union[int, None] = 0
@@ -53,55 +56,45 @@ class CSVConfig:
 
 @dataclass
 class TabularConfig:
-    csv: CSVConfig = CSVConfig()
-    impute_strategy: str = "median"    # 'mean', 'median', 'most_frequent', 'constant'
+    csv: CSVConfig = field(default_factory=CSVConfig)  # <-- FIX: default_factory, not CSVConfig()
+    impute_strategy: str = "median"   # 'mean', 'median', 'most_frequent', 'constant'
     scale: bool = True
     drop_duplicates: bool = True
     drop_full_nan_cols: bool = True
     categoricals_as_dummies: bool = True
     dummy_drop_first: bool = False
-
-
-@dataclass
-class TextConfig:
-    lowercase: bool = True
-    strip_punct: bool = True
-    min_df: int = 2
-    max_df: Union[float, int] = 0.95
-    ngram_range: Tuple[int, int] = (1, 2)
-    max_features: Optional[int] = 20000
-
-
-@dataclass
-class TimeSeriesConfig:
-    resample_rule: Optional[str] = None  # e.g., 'D', 'H'
-    forward_fill: bool = True
-    interpolate: bool = False
-    scale: bool = True
+    # Optional: columns to exclude from processing (e.g., labels/IDs); they will pass through unchanged
+    exclude_cols: Optional[List[str]] = None
 
 
 # =========================
-# Adapters
+# Adapter: Tabular
 # =========================
 class TabularAdapter(BaseAdapter):
     def __init__(self, config: Optional[TabularConfig] = None):
         self.config = config or TabularConfig()
-        self._imputer = None
-        self._scaler = None
+
+        # learned state
+        self._imputer: Optional[SimpleImputer] = None
+        self._scaler: Optional[StandardScaler] = None
         self._cols_numeric: List[str] = []
         self._cols_categorical: List[str] = []
+        self._feature_columns: List[str] = []  # final columns after dummies + keeping excluded columns
 
         if pd is None or np is None:
             warnings.warn("pandas/numpy not available; TabularAdapter disabled.", RuntimeWarning)
         if SimpleImputer is None or StandardScaler is None:
-            warnings.warn("scikit-learn not available; TabularAdapter will be limited.", RuntimeWarning)
+            warnings.warn("scikit-learn not available; impute/scale features will be limited.", RuntimeWarning)
 
+    # ---- helpers ----
     def _to_dataframe(self, data: Union[str, "pd.DataFrame"]) -> "pd.DataFrame":
         if pd is None:
             raise RuntimeError("pandas is required for TabularAdapter")
         if isinstance(data, str):
             if not data.lower().endswith(".csv"):
                 raise ValueError("TabularAdapter expected a DataFrame or a .csv path.")
+            if not os.path.exists(data):
+                raise FileNotFoundError(f"CSV file not found: {data}")
             cfg = self.config.csv
             kwargs = dict(
                 sep=cfg.sep,
@@ -118,33 +111,68 @@ class TabularAdapter(BaseAdapter):
             return pd.read_csv(data, **kwargs)
         return data
 
-    def _split_columns(self, df: "pd.DataFrame") -> None:
-        self._cols_numeric = df.select_dtypes(include=["number"]).columns.tolist()
-        self._cols_categorical = [c for c in df.columns if c not in self._cols_numeric]
+    def _drop_dupes_and_allnan(self, df: "pd.DataFrame") -> "pd.DataFrame":
+        if self.config.drop_duplicates:
+            df = df.drop_duplicates()
+        if self.config.drop_full_nan_cols:
+            df = df.dropna(axis=1, how="all")
+        return df
 
+    def _split_columns(self, df: "pd.DataFrame") -> None:
+        exclude = set(self.config.exclude_cols or [])
+        num = df.select_dtypes(include=["number"]).columns.tolist()
+        self._cols_numeric = [c for c in num if c not in exclude]
+        self._cols_categorical = [c for c in df.columns if c not in exclude and c not in self._cols_numeric]
+
+    def _apply_impute(self, df: "pd.DataFrame") -> "pd.DataFrame":
+        if self._cols_numeric:
+            if self._imputer is not None:
+                df[self._cols_numeric] = self._imputer.transform(df[self._cols_numeric])
+        return df
+
+    def _apply_scale(self, df: "pd.DataFrame") -> "pd.DataFrame":
+        if self._cols_numeric and self._scaler is not None:
+            df[self._cols_numeric] = self._scaler.transform(df[self._cols_numeric])
+        return df
+
+    def _apply_dummies(self, df: "pd.DataFrame") -> "pd.DataFrame":
+        if self.config.categoricals_as_dummies and self._cols_categorical:
+            df = pd.get_dummies(df, columns=self._cols_categorical, drop_first=self.config.dummy_drop_first)
+        return df
+
+    # ---- fit/transform ----
     def fit(self, data: Union[str, "pd.DataFrame"]) -> "TabularAdapter":
         if pd is None:
             return self
+
         df = self._to_dataframe(data).copy()
+        df = self._drop_dupes_and_allnan(df)
 
-        if self.config.drop_duplicates:
-            df = df.drop_duplicates()
-
-        if self.config.drop_full_nan_cols:
-            df = df.dropna(axis=1, how="all")
-
+        # split columns with excludes
         self._split_columns(df)
 
+        # fit imputer on numeric
         if SimpleImputer is not None and self._cols_numeric:
             self._imputer = SimpleImputer(strategy=self.config.impute_strategy)
             self._imputer.fit(df[self._cols_numeric])
 
-        if StandardScaler is not None and self.config.scale and self._cols_numeric:
-            X_num = df[self._cols_numeric]
-            if self._imputer is not None:
-                X_num = self._imputer.transform(X_num)
-            self._scaler = StandardScaler().fit(X_num)
+        # create an imputed copy for scaling + dummies discovery
+        if self._cols_numeric and self._imputer is not None:
+            df[self._cols_numeric] = self._imputer.transform(df[self._cols_numeric])
 
+        # fit scaler on numeric
+        if StandardScaler is not None and self.config.scale and self._cols_numeric:
+            self._scaler = StandardScaler().fit(df[self._cols_numeric])
+
+        # scale for column discovery (keeps names)
+        if self.config.scale and self._scaler is not None:
+            df[self._cols_numeric] = self._scaler.transform(df[self._cols_numeric])
+
+        # one-hot (to lock in dummy columns)
+        df = self._apply_dummies(df)
+
+        # final column order we will produce during transform
+        self._feature_columns = df.columns.tolist()
         return self
 
     def transform(self, data: Union[str, "pd.DataFrame"]) -> "pd.DataFrame":
@@ -152,125 +180,28 @@ class TabularAdapter(BaseAdapter):
             raise RuntimeError("pandas is required for TabularAdapter")
 
         df = self._to_dataframe(data).copy()
+        df = self._drop_dupes_and_allnan(df)
 
-        if self.config.drop_duplicates:
-            df = df.drop_duplicates()
-
-        if self.config.drop_full_nan_cols:
-            df = df.loc[:, [c for c in df.columns if not df[c].isna().all()]]
-
-        # Ensure same columns seen in fit (add missing with NaN)
-        for c in self._cols_numeric + self._cols_categorical:
+        # ensure columns seen at fit exist (add missing with NaN); also keep unknowns until reindex
+        for c in (self._cols_numeric + self._cols_categorical):
             if c not in df.columns:
                 df[c] = np.nan
 
-        # Impute numeric
-        if self._cols_numeric:
-            X_num = df[self._cols_numeric]
-            if self._imputer is not None:
-                X_num = self._imputer.transform(X_num)
-            df[self._cols_numeric] = X_num
+        # impute
+        if self._cols_numeric and self._imputer is not None:
+            df[self._cols_numeric] = self._imputer.transform(df[self._cols_numeric])
 
-        # One-hot encode categoricals
-        if self.config.categoricals_as_dummies and self._cols_categorical:
-            df = pd.get_dummies(df, columns=self._cols_categorical, drop_first=self.config.dummy_drop_first)
+        # scale (all numeric at once to keep shapes aligned)
+        if self.config.scale and self._scaler is not None and self._cols_numeric:
+            df[self._cols_numeric] = self._scaler.transform(df[self._cols_numeric])
 
-        # Scale numeric
-        if self.config.scale and self._cols_numeric and self._scaler is not None:
-            for c in self._cols_numeric:
-                if c in df.columns:
-                    df[c] = self._scaler.transform(df[[c]])
+        # dummies
+        df = self._apply_dummies(df)
 
-        return df
+        # now strictly align to training columns (fill missing with 0; drop extras)
+        if self._feature_columns:
+            df = df.reindex(columns=self._feature_columns, fill_value=0)
 
-
-class TextAdapter(BaseAdapter):
-    def __init__(self, config: Optional[TextConfig] = None):
-        self.config = config or TextConfig()
-        self._vectorizer = None
-        if TfidfVectorizer is None:
-            warnings.warn("scikit-learn not available; TextAdapter disabled.", RuntimeWarning)
-
-    @staticmethod
-    def _basic_clean(texts: Iterable[str], lowercase: bool, strip_punct: bool) -> List[str]:
-        import re
-        out = []
-        for t in texts:
-            s = t if isinstance(t, str) else str(t)
-            if lowercase:
-                s = s.lower()
-            if strip_punct:
-                s = re.sub(r"[^\w\s]", " ", s)
-            s = re.sub(r"\s+", " ", s).strip()
-            out.append(s)
-        return out
-
-    def fit(self, data: Iterable[str]) -> "TextAdapter":
-        texts = list(data)
-        texts = self._basic_clean(texts, self.config.lowercase, self.config.strip_punct)
-        if TfidfVectorizer is not None:
-            self._vectorizer = TfidfVectorizer(
-                min_df=self.config.min_df,
-                max_df=self.config.max_df,
-                ngram_range=self.config.ngram_range,
-                max_features=self.config.max_features,
-            ).fit(texts)
-        return self
-
-    def transform(self, data: Iterable[str]):
-        texts = list(data)
-        texts = self._basic_clean(texts, self.config.lowercase, self.config.strip_punct)
-        if self._vectorizer is None:
-            return texts
-        return self._vectorizer.transform(texts)
-
-
-class TimeSeriesAdapter(BaseAdapter):
-    def __init__(self, config: Optional[TimeSeriesConfig] = None):
-        self.config = config or TimeSeriesConfig()
-        self._scaler = None
-
-        if pd is None or np is None:
-            warnings.warn("pandas/numpy not available; TimeSeriesAdapter disabled.", RuntimeWarning)
-        if StandardScaler is None:
-            warnings.warn("scikit-learn not available; scaling disabled for TimeSeriesAdapter.", RuntimeWarning)
-
-    def fit(self, data: "pd.DataFrame") -> "TimeSeriesAdapter":
-        if pd is None:
-            return self
-        df = data.copy()
-        if not isinstance(df.index, pd.DatetimeIndex):
-            raise ValueError("TimeSeriesAdapter expects a DataFrame with a DatetimeIndex.")
-
-        if self.config.resample_rule:
-            df = df.resample(self.config.resample_rule).mean()
-        if self.config.interpolate:
-            df = df.interpolate()
-        if self.config.forward_fill:
-            df = df.ffill()
-
-        if self.config.scale and StandardScaler is not None:
-            self._scaler = StandardScaler().fit(df.select_dtypes(include="number"))
-        return self
-
-    def transform(self, data: "pd.DataFrame") -> "pd.DataFrame":
-        if pd is None:
-            raise RuntimeError("pandas is required for TimeSeriesAdapter")
-
-        df = data.copy()
-        if not isinstance(df.index, pd.DatetimeIndex):
-            raise ValueError("TimeSeriesAdapter expects a DataFrame with a DatetimeIndex.")
-
-        if self.config.resample_rule:
-            df = df.resample(self.config.resample_rule).mean()
-        if self.config.interpolate:
-            df = df.interpolate()
-        if self.config.forward_fill:
-            df = df.ffill()
-
-        if self.config.scale and self._scaler is not None:
-            num_cols = df.select_dtypes(include="number").columns
-            df[num_cols] = self._scaler.transform(df[num_cols])
         return df
 
 
@@ -278,6 +209,10 @@ class TimeSeriesAdapter(BaseAdapter):
 # Dispatcher / Registry
 # =========================
 class AdapterRegistry:
+    """
+    If you later add other tabular adapters, register predicates here.
+    For now, we route CSV paths or DataFrames to TabularAdapter.
+    """
     def __init__(self):
         self._rules: List[Tuple[Callable[[Any], bool], Callable[[], BaseAdapter]]] = []
 
@@ -313,47 +248,38 @@ class Preprocessor:
         return self._adapter.fit_transform(data)
 
 
-# =========================
-# Default registry (NO images)
-# =========================
 def default_registry() -> AdapterRegistry:
     reg = AdapterRegistry()
 
     # CSV path or DataFrame (non time-index) => Tabular
     def is_tabular(x: Any) -> bool:
-        is_csv = isinstance(x, str) and x.lower().endswith(".csv")
-        is_df_no_ts = (pd is not None and isinstance(x, pd.DataFrame)
-                       and not isinstance(x.index, pd.DatetimeIndex))
-        return is_csv or is_df_no_ts
-
-    reg.register(is_tabular, lambda: TabularAdapter())
-
-    # Time series: DataFrame with DatetimeIndex
-    def is_timeseries(x: Any) -> bool:
-        return (pd is not None
-                and isinstance(x, pd.DataFrame)
-                and isinstance(x.index, pd.DatetimeIndex))
-
-    reg.register(is_timeseries, lambda: TimeSeriesAdapter())
-
-    # Text: iterable of strings or pandas Series of object/str
-    def is_text(x: Any) -> bool:
-        if pd is not None and isinstance(x, pd.Series):
-            return x.dtype == "object" or x.dtype == "string"
-        if isinstance(x, (list, tuple)):
-            return len(x) == 0 or isinstance(x[0], str)
+        if isinstance(x, str) and x.lower().endswith(".csv"):
+            return True
+        if pd is not None and isinstance(x, pd.DataFrame):
+            # allow any DataFrame as "tabular" here
+            return True
         return False
 
-    reg.register(is_text, lambda: TextAdapter())
-
+    reg.register(is_tabular, lambda: TabularAdapter())
     return reg
 
 
 # =========================
-# Example
+# Example usage
 # =========================
 if __name__ == "__main__":
-    csv_path = "/mnt/data/Titanic-Dataset 2.csv"  # adjust if needed
-    X_tab = Preprocessor().fit_transform(csv_path)
-    print("From CSV ->", type(X_tab), getattr(X_tab, "shape", None))
+    # Change this to your local CSV path or pass a pandas DataFrame
+    csv_path = "Titanic-Dataset.csv"  # e.g., "/Users/you/Desktop/Titanic-Dataset 2.csv"
 
+    pre = Preprocessor()
+    try:
+        X = pre.fit_transform(csv_path)
+        print("Processed type:", type(X))
+        print("Processed shape:", getattr(X, "shape", None))
+        # If you want to inspect few columns:
+        try:
+            print("Columns (first 15):", list(X.columns)[:15])
+        except Exception:
+            pass
+    except Exception as e:
+        print("Error:", e)
