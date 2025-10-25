@@ -219,8 +219,8 @@ class MLPipeline:
 
 def parse_args():
     p = argparse.ArgumentParser(description="OOP ML pipeline: preprocess + 5 models")
-    p.add_argument("--csv", type=str, default="BankChurners.csv", help="Path to CSV")
-    p.add_argument("--target", type=str, default="Attrition_Flag", help="Target column")
+    p.add_argument("--csv", type=str, default="car_prices.csv", help="Path to CSV")
+    p.add_argument("--target", type=str, default="sellingprice", help="Target column")
     p.add_argument("--test_size", type=float, default=0.25, help="Hold-out size")
     p.add_argument("--seed", type=int, default=42, help="Random seed")
     p.add_argument("--out", type=str, default="ml_results.csv", help="Where to save results CSV")
