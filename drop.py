@@ -9,22 +9,17 @@ OOP ML Pipeline for `drop_out.csv`
 
 from __future__ import annotations
 import os
-import sys
 import argparse
 import warnings
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
-
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.model_selection import StratifiedKFold, cross_validate
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-
 # Models
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
