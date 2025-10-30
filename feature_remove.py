@@ -239,9 +239,9 @@ class MLPipeline:
 # ---------- CLI ----------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="OOP ML pipeline on drop_out.csv")
-    p.add_argument("--csv", type=str, default="drop_out.csv",
+    p.add_argument("--csv", type=str, default="BankChurners.csv",
                    help="Path to dataset CSV (semicolon-separated).")
-    p.add_argument("--target", type=str, default="Target", help="Target column name.")
+    p.add_argument("--target", type=str, default="Attrition_Flag", help="Target column name.")
     p.add_argument("--splits", type=int, default=5, help="Number of CV folds.")
     p.add_argument("--reports", type=str, default="./reports", help="Directory to save reports.")
     return p.parse_args()
