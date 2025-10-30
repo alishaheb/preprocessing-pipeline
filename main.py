@@ -20,7 +20,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.naive_bayes import GaussianNB
 from sklearn.svm import SVC
 from sklearn.neural_network import MLPClassifier
-
+#remove warnings
+import warnings
+warnings.filterwarnings("ignore")
 
 # ---------- Preprocessing ----------
 
